@@ -1,4 +1,5 @@
 import type {
+  AlertGroupsResponse,
   AlertsResponse,
   AlertSubscription,
   BatchContractsRequest,
@@ -53,6 +54,7 @@ import type {
   RuleCatalogResponse,
   RuleLibraryResponse,
 } from "./types";
+import type { ContractVersionEntry } from "@sorolens/ui";
 import { recordLastUpdated, resourceFromUrl } from "./lastUpdated";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
@@ -444,6 +446,35 @@ export function getContractVerification(
   );
 }
 
+// ---- Wasm changelog (issue #601) -------------------------------------------
+
+/**
+ * Full Wasm hash history for a contract, oldest first. Served by the
+ * changelog handler in apps/api/internal/changelog.
+ */
+export function getContractChangelog(
+  id: string
+): Promise<ContractVersionEntry[]> {
+  return fetchJson<ContractVersionEntry[]>(
+    `${API_URL}/api/v1/contracts/${id}/changelog`
+  );
+}
+
+/** Base URL the ContractChangelog component builds feed/badge links from. */
+export function changelogApiBase(): string {
+  return `${API_URL}/api/v1`;
+}
+
+/** URL of the Atom feed of a contract's Wasm upgrades. */
+export function contractChangelogFeedUrl(id: string): string {
+  return `${changelogApiBase()}/contracts/${id}/changelog/feed`;
+}
+
+/** URL of the embeddable SVG badge showing a contract's current Wasm hash. */
+export function contractChangelogBadgeUrl(id: string): string {
+  return `${changelogApiBase()}/contracts/${id}/changelog/badge`;
+}
+
 // ---- watchdog --------------------------------------------------------------
 
 export function getWatchdogStats(network?: string): Promise<WatchdogStats> {
@@ -550,6 +581,32 @@ export function listAlerts(
     ? `/api/v1/watchdog/contracts/${contractId}/alerts`
     : `/api/v1/watchdog/alerts`;
   return fetchJson<AlertsResponse>(`${API_URL}${path}${qs ? "?" + qs : ""}`);
+}
+
+/**
+ * Wrapper around the grouped alert feed (GET /api/v1/alerts, issue #269).
+ *
+ * Unlike listAlerts — the flat per-event watchdog feed — this returns one row
+ * per deduplicated group with its aggregate count plus first/last seen bounds.
+ * Filters mirror the flat feed: contract_id, severity and network.
+ */
+export function listAlertGroups(params?: {
+  contractId?: string;
+  severity?: string;
+  network?: string;
+  cursor?: string;
+  limit?: number;
+}): Promise<AlertGroupsResponse> {
+  const search = new URLSearchParams();
+  if (params?.contractId) search.set("contract_id", params.contractId);
+  if (params?.severity) search.set("severity", params.severity);
+  if (params?.network) search.set("network", params.network);
+  if (params?.cursor) search.set("cursor", params.cursor);
+  if (params?.limit) search.set("limit", String(params.limit));
+  const qs = search.toString();
+  return fetchJson<AlertGroupsResponse>(
+    `${API_URL}/api/v1/alerts${qs ? "?" + qs : ""}`
+  );
 }
 
 // ---- events explorer ------------------------------------------------------
