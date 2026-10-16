@@ -59,6 +59,10 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Export the live pool on every /metrics endpoint: the snapshot is read
+	// lazily on each scrape, so no background sampler is needed.
+	metrics.SetPool(func() metrics.PoolStat { return pool.Stat() })
+
 	redisOpts, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
 		logger.Error("redis parse url", "err", err)
@@ -121,6 +125,14 @@ func main() {
 	// Optional dedicated metrics listener. When METRICS_PORT is set, GET
 	// /metrics is served there without authentication so the exposition can be
 	// scraped on a private interface rather than the public API port.
+	//
+	// The admin listener serves the package-level registry, which owns the
+	// HTTP and pool collectors. The cache and rate-limiter counters live in
+	// the middleware package and are registered by the router on its own
+	// registry, so register them here too — METRICS_PORT then exposes the
+	// same series as GET /metrics on the main port.
+	metrics.Registry.MustRegister(middleware.CacheCollectors()...)
+	metrics.Registry.MustRegister(middleware.RateLimitCollectors()...)
 	var metricsSrv *http.Server
 	if cfg.MetricsPort != "" {
 		metricsSrv = &http.Server{

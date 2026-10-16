@@ -16,6 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	apiconfig "github.com/sorolens/sorolens/apps/api/internal/config"
 	sorohandler "github.com/sorolens/sorolens/apps/api/internal/handler"
+	"github.com/sorolens/sorolens/apps/api/internal/metrics"
 	"github.com/sorolens/sorolens/apps/api/internal/middleware"
 	"github.com/sorolens/sorolens/apps/api/internal/router"
 	"github.com/sorolens/sorolens/apps/api/internal/store"
@@ -45,6 +46,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			logger.Error("postgres connect", "err", err)
 			return
 		}
+		// Export the live pool on GET /metrics (read lazily per scrape).
+		metrics.SetPool(func() metrics.PoolStat { return pool.Stat() })
 
 		redisOpts, err := redis.ParseURL(os.Getenv("REDIS_URL"))
 		if err != nil {

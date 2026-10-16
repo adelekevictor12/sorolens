@@ -133,11 +133,15 @@ func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 	// scrape is never throttled. A registry per router keeps tests that build
 	// many routers independent; it carries the request collectors from the
 	// metrics package (updated by middleware.Metrics), the response-cache
-	// counters (issue #143), and the default Go and process collectors.
+	// counters (issue #143), the rate-limiter decision counters, the Postgres
+	// pool collector (metrics.SetPool wires the live pool), and the default Go
+	// and process collectors.
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	reg.MustRegister(middleware.CacheCollectors()...)
+	reg.MustRegister(middleware.RateLimitCollectors()...)
 	reg.MustRegister(metrics.HTTPRequestsInFlight, metrics.HTTPRequestsTotal, metrics.HTTPRequestDuration)
+	reg.MustRegister(metrics.PoolCollector())
 	r.Get("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP)
 	pprofAdmin := middleware.RequireRoleOrForbidden(h.Store, h.Logger, middleware.RoleAdmin)
 	r.With(pprofAdmin).Get("/debug/pprof", pprof.Index)

@@ -8,6 +8,7 @@ how to scrape them.
 - [Endpoints](#endpoints)
 - [Metric catalogue](#metric-catalogue)
   - [API](#api)
+  - [Postgres pool](#postgres-pool)
   - [Indexer](#indexer)
   - [Default Go collectors](#default-go-collectors)
 - [Example queries](#example-queries)
@@ -57,7 +58,8 @@ talks to each network's Soroban RPC and owns the per-network ledger cursor.
 
 The scrape endpoint is exempt from the API rate limiter (`middleware.RateLimit`)
 so that a scrape can never be throttled and never consumes another caller's
-budget.
+budget. The exemption is visible on the limiter counter below as
+`result="exempt"`.
 
 ---
 
@@ -79,12 +81,18 @@ PromQL:
 | `sorolens_http_requests_in_flight`       | Gauge     | –                           | Requests currently being served.                                                                           |
 | `sorolens_api_cache_requests_total`      | Counter   | `namespace`, `result`       | Response cache lookups. `namespace` is `contracts`, `watchdog`, or `labels`; `result` is `hit` or `miss`.  |
 | `sorolens_api_cache_purges_total`        | Counter   | `namespace`                 | Cache namespace purges triggered by a successful write (e.g. `POST /api/v1/contracts` purges `contracts`). |
+| `sorolens_api_ratelimit_requests_total`  | Counter   | `result`, `tier`            | Every request the rate limiter evaluates. `result` is `allowed`, `limited` (answered 429), `exempt` (health, version and scrape endpoints) or `error` (Redis failed open); `tier` is `anonymous` or `authenticated` for a request that presented an API key. |
 
 The `route` label is the **chi route pattern**, not the raw request path — for
 example `/api/v1/contracts/{id}` rather than
 `/api/v1/contracts/CDLZFC3S...`. This keeps label cardinality bounded no matter
-how many distinct contract IDs are requested. A request that matches no route
-(a 404) is recorded as `route="unmatched"`.
+how many distinct contract IDs are requested. Paths that match no route are
+folded into a fixed set of labels as well: a root-level 404 becomes
+`route="unmatched"`, and a 404 beneath a mounted subtree becomes that mount's
+wildcard pattern (`/api/v1/*`). No request can mint a new label value.
+
+Both `result` and `tier` on `sorolens_api_ratelimit_requests_total` are closed
+sets, so the metric has a hard ceiling of 4 × 2 = 8 series.
 
 Histogram buckets are the Prometheus defaults (`prometheus.DefBuckets`), from
 0.005s to 10s.
@@ -99,6 +107,32 @@ sum by (namespace) (rate(sorolens_api_cache_requests_total[5m]))
 
 Cached responses also carry an `X-Cache: HIT|MISS` header, which is handy when
 checking a single request with `curl -i`.
+
+### Postgres pool
+
+A snapshot of the API's `pgxpool` connection pool, read from `Pool.Stat()` on
+every scrape (no background sampler). The series carry **no labels at all**, so
+the family is a fixed 13 series in every deployment.
+
+| Metric                                          | Type    | Description                                                                                                          |
+| ------------------------------------------------ | ------- | -------------------------------------------------------------------------------------------------------------------- |
+| `sorolens_db_pool_acquires_total`                | Counter | Successful acquires from the pool.                                                                                    |
+| `sorolens_db_pool_acquire_duration_seconds_total` | Counter | Cumulative time spent waiting on acquires.                                                                            |
+| `sorolens_db_pool_empty_acquires_total`          | Counter | Acquires that had to wait because the pool held no idle connection — the saturation signal.                            |
+| `sorolens_db_pool_empty_acquire_wait_seconds_total` | Counter | Cumulative time spent waiting on an empty pool.                                                                     |
+| `sorolens_db_pool_canceled_acquires_total`       | Counter | Acquires canceled by a request context (client gone or deadline hit).                                                 |
+| `sorolens_db_pool_new_connections_total`          | Counter | New connections opened by the pool.                                                                                   |
+| `sorolens_db_pool_connections_destroyed_lifetime_total` | Counter | Connections destroyed after exceeding the maximum connection lifetime.                                          |
+| `sorolens_db_pool_connections_destroyed_idle_total` | Counter | Connections destroyed after exceeding the maximum idle time.                                                        |
+| `sorolens_db_pool_acquired_connections`           | Gauge   | Connections currently checked out.                                                                                    |
+| `sorolens_db_pool_idle_connections`               | Gauge   | Connections currently idle.                                                                                           |
+| `sorolens_db_pool_constructing_connections`       | Gauge   | Connections the pool is currently constructing.                                                                       |
+| `sorolens_db_pool_total_connections`              | Gauge   | Connections held by the pool (acquired + idle + constructing).                                                        |
+| `sorolens_db_pool_max_connections`                | Gauge   | Configured pool ceiling.                                                                                              |
+
+The collector is inert until a pool is wired (`metrics.SetPool` at startup),
+so an entrypoint that never connects to Postgres reports no pool series rather
+than misleading zeros.
 
 ### Indexer
 
@@ -163,6 +197,28 @@ histogram_quantile(
 sum(rate(sorolens_http_requests_total{status=~"5.."}[5m]))
   /
 sum(rate(sorolens_http_requests_total[5m]))
+```
+
+**Rate-limited request ratio**
+
+```promql
+sum(rate(sorolens_api_ratelimit_requests_total{result="limited"}[5m]))
+  /
+sum(rate(sorolens_api_ratelimit_requests_total[5m]))
+```
+
+**Connection pool saturation**
+
+```promql
+sorolens_db_pool_acquired_connections
+  /
+sorolens_db_pool_max_connections
+```
+
+**Requests waiting on an empty pool**
+
+```promql
+rate(sorolens_db_pool_empty_acquires_total[5m])
 ```
 
 **Indexer falling behind** (alert when lag exceeds 100 ledgers for 10 minutes)
@@ -230,6 +286,25 @@ groups:
 
 Pick the threshold from your network's ledger time. On Stellar a ledger closes
 roughly every 5 seconds, so 1000 ledgers is about 83 minutes of lag.
+
+The request metrics give the API something to alert on too:
+
+```yaml
+groups:
+  - name: sorolens-api
+    rules:
+      - alert: SorolensAPIHighErrorRate
+        expr: |
+          sum by (route) (rate(sorolens_http_requests_total{status=~"5.."}[5m]))
+            /
+          sum by (route) (rate(sorolens_http_requests_total[5m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of requests to {{ $labels.route }} are 5xx"
+```
 
 ---
 

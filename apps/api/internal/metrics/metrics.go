@@ -71,6 +71,10 @@ func init() {
 		HTTPRequestsInFlight,
 		HTTPRequestsTotal,
 		HTTPRequestDuration,
+
+		// Postgres pool snapshot (see pool.go); inert until SetPool wires a
+		// live pool.
+		dbPoolCollector,
 	)
 }
 
